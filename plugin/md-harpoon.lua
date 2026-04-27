@@ -7,7 +7,7 @@
 if vim.g.loaded_md_harpoon then return end
 vim.g.loaded_md_harpoon = 1
 
-local SLOTS = { "q", "w", "e", "a", "s", "d" }
+local SLOTS = { "1", "2", "3", "a", "s", "d" }
 
 local function require_slot(arg)
   if not arg or arg == "" then
@@ -50,3 +50,7 @@ end, { nargs = "+", desc = "md-harpoon: render <slot> <path> into slot" })
 vim.api.nvim_create_user_command("MdHarpoonFind", function()
   require("md-harpoon").find()
 end, { nargs = 0, desc = "md-harpoon: fuzzy-find a markdown file, then pick a slot" })
+
+vim.api.nvim_create_user_command("MdHarpoonCloseAll", function()
+  require("md-harpoon").close_all()
+end, { nargs = 0, desc = "md-harpoon: close every open slot float" })

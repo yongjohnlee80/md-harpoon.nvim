@@ -2,9 +2,10 @@
 --
 -- Wraps `delphinus/md-render.nvim` (which does the actual rendering) and adds
 -- a slot manager that lets you keep up to six markdown files open as
--- coexisting floats laid out in a 2×3 grid: q/w/e on top, a/s/d on the
--- bottom. Each slot remembers the cursor position you left it at, so
--- focusing back into a slot drops you exactly where you were — not at line 1.
+-- coexisting floats. The layout is a cascade — 1/2/3 at the top of the
+-- screen, a/s/d offset half-a-column right and a few rows down of their
+-- 1/2/3 pair so the bottom row sits roughly between the top panels. Each
+-- slot remembers the cursor position you left it at.
 --
 -- Why this exists: md-render's bundled `MdPreview.show()` keeps a single
 -- module-local FloatWin and `close_if_valid`s it on every call, so calling
@@ -16,8 +17,11 @@
 -- Notable differences from `MdPreview.show()`:
 --   * `auto_close = false` on every slot's FloatWin so floats persist while
 --     focus moves between source buffers and other floats.
---   * Geometry is fixed to a left/middle/right × top/bottom grid (each panel
---     ~⅓ wide, ~½ tall) instead of one centered float.
+--   * Geometry is a six-panel cascade. All six panels share the same width
+--     clamp [MIN_PANEL_WIDTH, MAX_PANEL_WIDTH] and the same height (~85% of
+--     screen rows). a/s/d are offset right by CASCADE_X_FRAC × column-step
+--     and down by CASCADE_Y from their pair (1, 2, 3 respectively) —
+--     overlap is by design.
 --   * Cursor sync-back to source on close is intentionally dropped — with
 --     six slots open against different sources, syncing them all back is
 --     more confusing than helpful.
@@ -35,16 +39,43 @@ local MIN_PANEL_WIDTH = 80
 local MAX_PANEL_WIDTH = 120
 local CONTENT_INTERIOR_WIDTH = MAX_PANEL_WIDTH - 4
 
+-- Cascade offsets — how far a/s/d shift down-and-right of their 1/2/3
+-- pair. Horizontal offset is a fraction of the ⅓-grid column step so it
+-- scales with screen width: 0.5 = halfway between adjacent top panels
+-- (a sits between 1 and 2 horizontally), 1.0 would put a directly
+-- beneath the next top panel.
+local CASCADE_X_FRAC = 0.5
+local CASCADE_Y = 4
+
+-- Vertical fraction of the screen each panel occupies. Same for all
+-- six slots — the cascade comes from CASCADE_Y, not from height
+-- differences.
+local PANEL_HEIGHT_FRAC = 0.85
+
+-- Top row uses digits (1/2/3) instead of q/w/e to avoid clashing with
+-- vim's macro-record key (`q`). Bottom row stays on the home row.
 local SLOT_POS = {
-  q = { row = "top",    col = "left"   },
-  w = { row = "top",    col = "middle" },
-  e = { row = "top",    col = "right"  },
-  a = { row = "bottom", col = "left"   },
-  s = { row = "bottom", col = "middle" },
-  d = { row = "bottom", col = "right"  },
+  ["1"] = { row = "top",    col = "left"   },
+  ["2"] = { row = "top",    col = "middle" },
+  ["3"] = { row = "top",    col = "right"  },
+  a     = { row = "bottom", col = "left"   },
+  s     = { row = "bottom", col = "middle" },
+  d     = { row = "bottom", col = "right"  },
 }
 
-M.SLOTS = { "q", "w", "e", "a", "s", "d" }
+M.SLOTS = { "1", "2", "3", "a", "s", "d" }
+
+-- Human-readable labels used by the file-picker's panel-prompt. The
+-- format_item callback in M.find resolves these so the user sees
+-- "upper left (1)" instead of a bare "1".
+local SLOT_LABELS = {
+  ["1"] = "upper left (1)",
+  ["2"] = "upper middle (2)",
+  ["3"] = "upper right (3)",
+  a     = "left (a)",
+  s     = "middle (s)",
+  d     = "right (d)",
+}
 
 ---@class MdHarpoonSlotState
 ---@field float_win MdRender.FloatWin
@@ -73,30 +104,27 @@ end
 --     screen-size independent.
 --   * Within those bounds, panels track their content's actual width.
 --
--- Column placement uses a ⅓ grid for predictable left/middle/right
--- positioning. Three MAX_PANEL_WIDTH-wide panels overlap on screens narrower
--- than ~3 × MAX_PANEL_WIDTH; intentional ("a little overlap is okay since
--- we have focus features").
+-- Column placement uses a ⅓ grid for 1/2/3 (left / middle / right). a/s/d
+-- shift right of their pair by CASCADE_X_FRAC × column-step — at 0.5,
+-- a sits halfway between 1 and 2. Three MAX_PANEL_WIDTH-wide panels
+-- overlap on screens narrower than ~3 × MAX_PANEL_WIDTH; intentional
+-- ("overlap is fine, focus features make it usable").
 --
--- Row placement splits available height roughly in half — top row at
--- row=1, bottom row offset down by `top_height + 1` for a 1-line gap.
--- A/s/d sit slightly lower than they did in the 3-slot ancestor to make
--- room for q/w/e on top.
+-- Row placement: 1/2/3 at row 1, a/s/d at row 1 + CASCADE_Y. All six
+-- panels share the same height (PANEL_HEIGHT_FRAC × screen rows) — the
+-- cascade is purely an offset, not a half-screen split.
 --
 -- Returns (row, col, width, height).
 local function geometry(slot, content_lines, content_max_width)
   local cols, lines = vim.o.columns, vim.o.lines
   local margin = 1
   local each_outer = math.floor((cols - 4 * margin) / 3) -- ⅓ slot incl. borders
+  local cascade_x = math.floor(each_outer * CASCADE_X_FRAC)
   local width = math.max(MIN_PANEL_WIDTH, math.min(MAX_PANEL_WIDTH, content_max_width + 2))
-
-  -- Reserve ~3 lines for cmdline + status; 1-line gap between rows.
-  local usable = math.max(10, lines - 3)
-  local row_height = math.floor((usable - 1) / 2)
-  local height = math.min(content_lines, row_height)
+  local height = math.min(content_lines, math.floor(lines * PANEL_HEIGHT_FRAC))
 
   local pos = SLOT_POS[slot]
-  local row = pos.row == "top" and 1 or (1 + row_height + 1)
+  local row = (pos.row == "top") and 1 or (1 + CASCADE_Y)
 
   local col
   if pos.col == "left" then
@@ -106,6 +134,7 @@ local function geometry(slot, content_lines, content_max_width)
   else
     col = margin + 2 * (each_outer + margin)
   end
+  if pos.row == "bottom" then col = col + cascade_x end
   -- Keep the float on screen on narrow terminals: if the right edge would
   -- fall off the visible area, slide left so it fits flush against the
   -- right margin. Mirrors the plugin's own clamp in
@@ -269,7 +298,7 @@ end
 --- float, it is replaced. Cursor is repositioned to the top — explicitly
 --- "load a new document here". Notifies if the current buffer isn't
 --- markdown.
----@param slot "q"|"w"|"e"|"a"|"s"|"d"
+---@param slot "1"|"2"|"3"|"a"|"s"|"d"
 function M.render_current(slot)
   local s = ensure_slot(slot)
   s.float_win:close_if_valid()
@@ -281,7 +310,7 @@ end
 --- current buffer. Cursor positions to the top (this is a fresh load by
 --- definition). Used by the file picker and as a programmatic entry point
 --- (e.g. external RPC: `render_path('a', '/path/to/file.md')`).
----@param slot "q"|"w"|"e"|"a"|"s"|"d"
+---@param slot "1"|"2"|"3"|"a"|"s"|"d"
 ---@param path string absolute or `~`-prefixed path to a markdown file
 function M.render_path(slot, path)
   local resolved = vim.fn.expand(path)
@@ -304,9 +333,9 @@ end
 ---   2. Float closed but slot has a remembered source → reopen with it,
 ---      restoring the cursor to where you left it.
 ---   3. Slot never rendered yet → render the current buffer (handy: the
----      lowercase key "just works" the first time without making the user
----      remember the uppercase variant).
----@param slot "q"|"w"|"e"|"a"|"s"|"d"
+---      lowercase / digit key "just works" the first time without
+---      making the user remember the uppercase / shift variant).
+---@param slot "1"|"2"|"3"|"a"|"s"|"d"
 function M.focus(slot)
   local s = ensure_slot(slot)
   local win = s.float_win.win
@@ -321,9 +350,22 @@ function M.focus(slot)
   open_slot(slot, vim.api.nvim_get_current_buf())
 end
 
+--- Close every open slot float without touching the slots' remembered
+--- sources or cursor positions. Pressing the lowercase / digit focus
+--- key for any slot afterwards reopens it with the cursor exactly where
+--- you left it. Useful when six floats have piled up and you want a
+--- clean screen for a moment.
+function M.close_all()
+  for _, slot in ipairs(M.SLOTS) do
+    local s = State[slot]
+    if s then s.float_win:close_if_valid() end
+  end
+end
+
 local function prompt_panel_and_render(path)
   vim.ui.select(M.SLOTS, {
     prompt = ("Render %q into panel:"):format(vim.fn.fnamemodify(path, ":t")),
+    format_item = function(slot) return SLOT_LABELS[slot] or slot end,
   }, function(slot)
     if slot then M.render_path(slot, path) end
   end)
