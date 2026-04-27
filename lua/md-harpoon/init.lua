@@ -17,11 +17,13 @@
 -- Notable differences from `MdPreview.show()`:
 --   * `auto_close = false` on every slot's FloatWin so floats persist while
 --     focus moves between source buffers and other floats.
---   * Geometry is a six-panel cascade. All six panels share the same width
---     clamp [MIN_PANEL_WIDTH, MAX_PANEL_WIDTH] and the same height (~85% of
---     screen rows). a/s/d are offset right by CASCADE_X_FRAC × column-step
---     and down by CASCADE_Y from their pair (1, 2, 3 respectively) —
---     overlap is by design.
+--   * Geometry is a six-panel cascade. Per-panel width clamps to
+--     [config.min_panel_width, config.max_panel_width] and tracks content;
+--     all six panels share the same height (~85% of screen rows). Layout
+--     anchors panel 1 to the top-left and panel d to the bottom-right of
+--     the screen, then derives the rest — corners always fit, overlap in
+--     the middle is acceptable. a/s/d are offset right by cascade_x and
+--     down by cascade_y from their 1/2/3 pair.
 --   * Cursor sync-back to source on close is intentionally dropped — with
 --     six slots open against different sources, syncing them all back is
 --     more confusing than helpful.
@@ -31,26 +33,34 @@
 
 local M = {}
 
--- Panel width bounds. Adjust here to change the per-slot floor/ceiling.
--- The float clamps to [MIN_PANEL_WIDTH, MAX_PANEL_WIDTH]; content wraps
--- at CONTENT_INTERIOR_WIDTH (= MAX_PANEL_WIDTH - 4 to leave room for the
--- rounded border + a 1-col right-edge margin).
-local MIN_PANEL_WIDTH = 80
-local MAX_PANEL_WIDTH = 120
-local CONTENT_INTERIOR_WIDTH = MAX_PANEL_WIDTH - 4
+-- Defaults. Overridable via M.setup({...}). Calling setup is optional —
+-- if the user never calls it, these values are used as-is.
+--
+--   min_panel_width / max_panel_width — per-slot width clamp. Layout
+--     anchoring uses max as the assumed width; per-panel width still
+--     tracks content (max(min, min(max, content+2))).
+--   panel_height_frac — vertical fraction of screen each panel occupies.
+--   cascade_x_frac    — bottom-row horizontal offset as a fraction of
+--     the slack between the two corner panels (1 and d). 0.5 = a sits
+--     halfway between 1 and 2 on a wide screen; on a narrow screen the
+--     slack shrinks so cascade_x shrinks with it.
+--   cascade_y         — bottom-row vertical offset, in rows.
+local DEFAULTS = {
+  min_panel_width   = 60,
+  max_panel_width   = 120,
+  panel_height_frac = 0.85,
+  cascade_x_frac    = 0.5,
+  cascade_y         = 4,
+}
 
--- Cascade offsets — how far a/s/d shift down-and-right of their 1/2/3
--- pair. Horizontal offset is a fraction of the ⅓-grid column step so it
--- scales with screen width: 0.5 = halfway between adjacent top panels
--- (a sits between 1 and 2 horizontally), 1.0 would put a directly
--- beneath the next top panel.
-local CASCADE_X_FRAC = 0.5
-local CASCADE_Y = 4
+local config = vim.deepcopy(DEFAULTS)
 
--- Vertical fraction of the screen each panel occupies. Same for all
--- six slots — the cascade comes from CASCADE_Y, not from height
--- differences.
-local PANEL_HEIGHT_FRAC = 0.85
+--- Merge user options into the config table. Calling this is optional;
+--- defaults are applied at module load.
+---@param opts? table
+function M.setup(opts)
+  config = vim.tbl_deep_extend("force", vim.deepcopy(DEFAULTS), opts or {})
+end
 
 -- Top row uses digits (1/2/3) instead of q/w/e to avoid clashing with
 -- vim's macro-record key (`q`). Bottom row stays on the home row.
@@ -99,47 +109,76 @@ local function ensure_slot(slot)
   return State[slot]
 end
 
--- Width policy (panels, not content):
---   * Floor / ceiling from MIN_PANEL_WIDTH / MAX_PANEL_WIDTH. Hard bounds,
---     screen-size independent.
---   * Within those bounds, panels track their content's actual width.
+-- Width policy:
+--   * Per-panel width clamps to [config.min_panel_width, config.max_panel_width]
+--     and tracks its own content (max(min, min(max, content+2))).
+--   * Layout positions are computed from a single "layout_W" so panels with
+--     short content don't shift the cascade. layout_W starts at max_panel_width
+--     and shrinks toward min_panel_width if the two corner panels (1 and d)
+--     wouldn't otherwise both fit on screen.
 --
--- Column placement uses a ⅓ grid for 1/2/3 (left / middle / right). a/s/d
--- shift right of their pair by CASCADE_X_FRAC × column-step — at 0.5,
--- a sits halfway between 1 and 2. Three MAX_PANEL_WIDTH-wide panels
--- overlap on screens narrower than ~3 × MAX_PANEL_WIDTH; intentional
--- ("overlap is fine, focus features make it usable").
+-- Column placement (anchor-corners): panel 1 is pinned to the left margin;
+-- panel d is pinned flush to the right margin. 3 sits cascade_x to the left
+-- of d, 2 is centered between 1 and 3, and a/s sit cascade_x right of 1/2.
+-- This guarantees both screen corners are always visible, replacing the old
+-- ⅓-grid + post-hoc clamp that would collapse multiple panels onto the same
+-- column on narrow terminals.
 --
--- Row placement: 1/2/3 at row 1, a/s/d at row 1 + CASCADE_Y. All six
--- panels share the same height (PANEL_HEIGHT_FRAC × screen rows) — the
--- cascade is purely an offset, not a half-screen split.
---
--- Returns (row, col, width, height).
-local function geometry(slot, content_lines, content_max_width)
-  local cols, lines = vim.o.columns, vim.o.lines
+-- Row placement: 1/2/3 at row 1, a/s/d at row 1 + cascade_y. All six panels
+-- share the same height (panel_height_frac × screen rows).
+local function compute_layout()
+  local cols = vim.o.columns
   local margin = 1
-  local each_outer = math.floor((cols - 4 * margin) / 3) -- ⅓ slot incl. borders
-  local cascade_x = math.floor(each_outer * CASCADE_X_FRAC)
-  local width = math.max(MIN_PANEL_WIDTH, math.min(MAX_PANEL_WIDTH, content_max_width + 2))
-  local height = math.min(content_lines, math.floor(lines * PANEL_HEIGHT_FRAC))
+  local layout_W = config.max_panel_width
+  local available = cols - 2 * margin
+
+  -- cascade_x scales with the slack between the two corner panels: at
+  -- cascade_x_frac=0.5, a sits halfway between 1 and 2 on a wide screen,
+  -- and shrinks toward 0 as the screen narrows.
+  local function cascade_for(W)
+    local slack = available - W
+    if slack <= 0 then return 0 end
+    return math.floor((slack * config.cascade_x_frac) / 2)
+  end
+
+  -- Shrink layout_W until both corners (1 and d) fit. Floor at min_panel_width;
+  -- if even that doesn't fit, drop cascade_x to 0 (overlap is acceptable;
+  -- off-screen is not).
+  local cascade_x = cascade_for(layout_W)
+  while 2 * layout_W + cascade_x > available and layout_W > config.min_panel_width do
+    layout_W = layout_W - 1
+    cascade_x = cascade_for(layout_W)
+  end
+  if 2 * layout_W + cascade_x > available then cascade_x = 0 end
+
+  local x1 = margin
+  local xd = math.max(margin, cols - layout_W - margin)
+  local x3 = math.max(margin, xd - cascade_x)
+  local x2 = math.floor((x1 + x3) / 2)
+  local xa = x1 + cascade_x
+  local xs = x2 + cascade_x
+
+  return {
+    layout_W  = layout_W,
+    cascade_x = cascade_x,
+    cols_by_slot = {
+      ["1"] = x1, ["2"] = x2, ["3"] = x3,
+      a = xa, s = xs, d = xd,
+    },
+  }
+end
+
+-- Returns (row, col, width, height) for a slot.
+local function geometry(slot, content_lines, content_max_width)
+  local lines = vim.o.lines
+  local layout = compute_layout()
+  local width = math.max(config.min_panel_width,
+    math.min(config.max_panel_width, content_max_width + 2))
+  local height = math.min(content_lines, math.floor(lines * config.panel_height_frac))
 
   local pos = SLOT_POS[slot]
-  local row = (pos.row == "top") and 1 or (1 + CASCADE_Y)
-
-  local col
-  if pos.col == "left" then
-    col = margin
-  elseif pos.col == "middle" then
-    col = margin + each_outer + margin
-  else
-    col = margin + 2 * (each_outer + margin)
-  end
-  if pos.row == "bottom" then col = col + cascade_x end
-  -- Keep the float on screen on narrow terminals: if the right edge would
-  -- fall off the visible area, slide left so it fits flush against the
-  -- right margin. Mirrors the plugin's own clamp in
-  -- display_utils.open_float_window.
-  col = math.min(col, math.max(0, cols - width))
+  local row = (pos.row == "top") and 1 or (1 + config.cascade_y)
+  local col = layout.cols_by_slot[slot]
   return row, col, width, height
 end
 
@@ -179,9 +218,11 @@ local function open_slot(slot, source_bufnr)
 
   local source_lines = vim.api.nvim_buf_get_lines(source_bufnr, 0, -1, false)
   local source_name = vim.api.nvim_buf_get_name(source_bufnr)
+  -- Content wraps at max_panel_width - 4 to leave room for the rounded
+  -- border + a 1-col right-edge margin.
   local opts = {
     buf_dir = vim.fn.fnamemodify(source_name, ":h"),
-    max_width = CONTENT_INTERIOR_WIDTH,
+    max_width = config.max_panel_width - 4,
   }
   local fold_state, expand_state = {}, {}
 
