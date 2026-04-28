@@ -54,3 +54,20 @@ end, { nargs = 0, desc = "md-harpoon: fuzzy-find a markdown file, then pick a sl
 vim.api.nvim_create_user_command("MdHarpoonCloseAll", function()
   require("md-harpoon").close_all()
 end, { nargs = 0, desc = "md-harpoon: close every open slot float" })
+
+vim.api.nvim_create_user_command("MdHarpoonBrowser", function(o)
+  local opts = {}
+  local arg = (o.args or ""):match("^%s*(%S+)%s*$")
+  if arg then
+    if not vim.tbl_contains(SLOTS, arg) then
+      vim.notify("md-harpoon: unknown slot " .. arg, vim.log.levels.WARN)
+      return
+    end
+    opts.slot = arg
+  end
+  require("md-harpoon").browser_open(opts)
+end, {
+  nargs = "?",
+  complete = complete_slots,
+  desc = "md-harpoon: render to HTML and open in browser (current buffer or [slot])",
+})

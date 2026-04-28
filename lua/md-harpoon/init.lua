@@ -51,6 +51,36 @@ local DEFAULTS = {
   panel_height_frac = 0.85,
   cascade_x_frac    = 0.5,
   cascade_y         = 4,
+
+  -- Browser export. M.browser_open() converts a source markdown buffer to
+  -- standalone HTML and opens it via vim.ui.open. Pandoc is the only
+  -- external dependency.
+  --
+  --   browser_converter         — currently "pandoc" only. Kept as a
+  --     config key so a future cmark-gfm path can land without breaking
+  --     the API.
+  --   browser_cache_dir         — where rendered HTML lands. nil falls
+  --     back to stdpath("cache") .. "/md-harpoon".
+  --   browser_css               — absolute path to a user CSS file (ends
+  --     in .css → linked via --css; otherwise treated as a raw HTML
+  --     header fragment for --include-in-header). nil uses the small
+  --     built-in stylesheet.
+  --   browser_resolve_wikilinks — rewrite [[page]] and ![[asset]] before
+  --     pandoc runs so the same file renders in both Obsidian and a
+  --     browser. Disable if your sources already use plain markdown
+  --     links.
+  --   browser_mermaid         — when to inject the mermaid.js loader.
+  --     "auto" (default) — inject only if the source contains
+  --     ```mermaid blocks. "on" — always inject. "off" — never. The
+  --     loader uses a dynamic <script> tag (created at view-time) so
+  --     pandoc's --embed-resources does not try to inline the mermaid
+  --     library at generation time. View-time needs internet to fetch
+  --     mermaid.min.js from CDN.
+  browser_converter         = "pandoc",
+  browser_cache_dir         = nil,
+  browser_css               = nil,
+  browser_resolve_wikilinks = true,
+  browser_mermaid           = "auto",
 }
 
 local config = vim.deepcopy(DEFAULTS)
@@ -401,6 +431,324 @@ function M.close_all()
     local s = State[slot]
     if s then s.float_win:close_if_valid() end
   end
+end
+
+-- ============================================================================
+-- Browser export
+--
+-- Convert a source markdown buffer to standalone HTML and open it via
+-- vim.ui.open. Pandoc is the only external dependency. Wikilinks
+-- ([[page]] and ![[asset]]) are preprocessed in Lua before pandoc runs so
+-- the same source renders in both Obsidian and a browser.
+-- ============================================================================
+
+-- Tiny default stylesheet — system font, readable max-width, code blocks
+-- with subtle background. Designed to cost ~1 KB and look reasonable
+-- against arbitrary user content. Override entirely via config.browser_css.
+local DEFAULT_CSS = [[
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 760px; margin: 2em auto; padding: 0 1em; line-height: 1.55; color: #222; background: #fafafa; }
+  h1, h2, h3, h4 { line-height: 1.25; margin-top: 1.6em; }
+  h1 { border-bottom: 1px solid #ddd; padding-bottom: 0.3em; }
+  pre { background: #f0f0f0; padding: 0.8em; overflow-x: auto; border-radius: 4px; }
+  code { background: #f0f0f0; padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.92em; }
+  pre code { padding: 0; background: none; }
+  blockquote { border-left: 3px solid #ccc; padding-left: 1em; color: #555; margin: 1em 0; }
+  table { border-collapse: collapse; margin: 1em 0; }
+  th, td { border: 1px solid #ddd; padding: 0.4em 0.8em; }
+  th { background: #f4f4f4; }
+  img { max-width: 100%; }
+  a { color: #06c; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  hr { border: none; border-top: 1px solid #ddd; margin: 2em 0; }
+  .mermaid { text-align: center; margin: 1em 0; background: #fff; padding: 0.5em; border-radius: 4px; }
+  .mermaid svg { max-width: 100%; height: auto; }
+</style>
+]]
+
+-- Mermaid loader — injected via --include-in-header when the source has
+-- mermaid blocks. Uses a *dynamically created* <script> tag (rather than
+-- a static <script src=...>) so pandoc's --embed-resources doesn't try to
+-- inline the mermaid library at generation time. Mermaid loads from CDN
+-- at view-time; offline rendering would need a local-file variant.
+--
+-- Selector handles both pandoc-default output (<pre class="mermaid">
+-- <code>…</code></pre>) and the Prism / highlight.js convention
+-- (<pre><code class="language-mermaid">…</code></pre>).
+local MERMAID_HEADER = [[
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    var pres = new Set();
+    document.querySelectorAll('pre.mermaid').forEach(function(p) { pres.add(p); });
+    document.querySelectorAll('pre > code.language-mermaid, pre > code.mermaid').forEach(function(c) {
+      pres.add(c.parentElement);
+    });
+    if (pres.size === 0) return;
+    pres.forEach(function(pre) {
+      var code = pre.querySelector('code');
+      var text = code ? code.textContent : pre.textContent;
+      var div = document.createElement('div');
+      div.className = 'mermaid';
+      div.textContent = text;
+      pre.replaceWith(div);
+    });
+    var script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+    script.onload = function() {
+      mermaid.initialize({ startOnLoad: false, theme: 'default' });
+      mermaid.run();
+    };
+    script.onerror = function() {
+      console.error('mermaid: failed to load from CDN');
+    };
+    document.head.appendChild(script);
+  });
+</script>
+]]
+
+local function browser_cache_dir()
+  local dir = config.browser_cache_dir or (vim.fn.stdpath("cache") .. "/md-harpoon")
+  vim.fn.mkdir(dir, "p")
+  return dir
+end
+
+-- Stable per-source path. Same source ID → same URL, so reopening a
+-- render in the same browser tab works. Filename uses the basename for
+-- human readability plus an 8-char SHA suffix for collision avoidance.
+local function browser_html_path(source_ident)
+  local basename = vim.fn.fnamemodify(source_ident, ":t:r")
+  if basename == "" then basename = "buffer" end
+  local hash = vim.fn.sha256(source_ident):sub(1, 8)
+  return browser_cache_dir() .. "/" .. basename .. "-" .. hash .. ".html"
+end
+
+-- Lazy-write the default stylesheet to a fixed path so pandoc can pick
+-- it up via --include-in-header. Skipped when the user supplies their own.
+local function ensure_default_css_file()
+  local p = browser_cache_dir() .. "/style-default.html"
+  if vim.fn.filereadable(p) ~= 1 then
+    local f = io.open(p, "w")
+    if not f then return nil end
+    f:write(DEFAULT_CSS)
+    f:close()
+  end
+  return p
+end
+
+-- Lazy-write the mermaid loader to a fixed path. Same caching pattern as
+-- the default CSS — written once, picked up by --include-in-header.
+local function ensure_mermaid_header_file()
+  local p = browser_cache_dir() .. "/mermaid-header.html"
+  if vim.fn.filereadable(p) ~= 1 then
+    local f = io.open(p, "w")
+    if not f then return nil end
+    f:write(MERMAID_HEADER)
+    f:close()
+  end
+  return p
+end
+
+-- Cheap pre-pandoc scan for fenced ```mermaid (or ~~~mermaid) blocks.
+-- Used by browser_mermaid = "auto" to skip the loader injection on
+-- documents that don't need it.
+local function source_has_mermaid(md)
+  return md:match("```%s*mermaid") ~= nil or md:match("~~~%s*mermaid") ~= nil
+end
+
+-- Rewrite Obsidian-style links so the resulting HTML is sensible:
+--   ![[image.png]]      → ![](image.png)
+--   ![[image.png|alt]]  → ![alt](image.png)
+--   [[page|alt]]        → [alt](page.html)
+--   [[page]]            → [page](page.html)
+-- Cross-page <a href="page.html"> links assume the user will render the
+-- linked pages too; otherwise they 404. That's a deliberate tradeoff —
+-- it preserves navigability when multiple sources land in the same
+-- cache dir.
+local function resolve_wikilinks(content)
+  content = content:gsub("!%[%[([^%]|]+)|([^%]]+)%]%]", "![%2](%1)")
+  content = content:gsub("!%[%[([^%]]+)%]%]", "![](%1)")
+  content = content:gsub("%[%[([^%]|]+)|([^%]]+)%]%]", function(target, alt)
+    local href = target:gsub("%.md$", "") .. ".html"
+    return ("[%s](%s)"):format(alt, href)
+  end)
+  content = content:gsub("%[%[([^%]]+)%]%]", function(target)
+    local href = target:gsub("%.md$", "") .. ".html"
+    return ("[%s](%s)"):format(target, href)
+  end)
+  return content
+end
+
+-- Returns: (source_ident, source_lines, source_dir) or all nil on failure.
+-- source_ident is the absolute path for real files, "buf:<n>" for unnamed
+-- buffers (used only for hash stability). source_dir feeds pandoc's
+-- --resource-path so relative image references resolve.
+local function browser_resolve_source(opts)
+  -- Explicit slot.
+  if opts.slot then
+    local s = State[opts.slot]
+    if not s or not s.source_path then
+      vim.notify("md-harpoon: slot " .. opts.slot .. " has no remembered source",
+        vim.log.levels.WARN)
+      return nil, nil, nil
+    end
+    -- Prefer the live buffer (may have unsaved edits) over the on-disk file.
+    if s.source_bufnr and vim.api.nvim_buf_is_valid(s.source_bufnr) then
+      local lines = vim.api.nvim_buf_get_lines(s.source_bufnr, 0, -1, false)
+      return s.source_path, lines, vim.fn.fnamemodify(s.source_path, ":h")
+    end
+    if vim.fn.filereadable(s.source_path) ~= 1 then
+      vim.notify("md-harpoon: slot source file not readable: " .. s.source_path,
+        vim.log.levels.WARN)
+      return nil, nil, nil
+    end
+    return s.source_path, vim.fn.readfile(s.source_path), vim.fn.fnamemodify(s.source_path, ":h")
+  end
+
+  -- Explicit path.
+  if opts.path then
+    local resolved = vim.fn.expand(opts.path)
+    if vim.fn.filereadable(resolved) ~= 1 then
+      vim.notify("md-harpoon: file not readable: " .. resolved, vim.log.levels.WARN)
+      return nil, nil, nil
+    end
+    return resolved, vim.fn.readfile(resolved), vim.fn.fnamemodify(resolved, ":h")
+  end
+
+  -- Explicit buffer.
+  local bufnr = opts.buf
+  if bufnr then
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+      vim.notify("md-harpoon: invalid buffer", vim.log.levels.WARN)
+      return nil, nil, nil
+    end
+  else
+    -- Default: if the focused window is a slot float, use that slot's
+    -- source. Otherwise use the current buffer. Lets `<leader>mb` mean
+    -- "render whatever I'm looking at" without an extra arg.
+    local cur_win = vim.api.nvim_get_current_win()
+    for _, slot in ipairs(M.SLOTS) do
+      local s = State[slot]
+      if s and s.float_win and s.float_win.win == cur_win then
+        return browser_resolve_source({ slot = slot })
+      end
+    end
+    bufnr = vim.api.nvim_get_current_buf()
+  end
+
+  if not is_markdown(bufnr) then
+    vim.notify("md-harpoon: buffer is not markdown", vim.log.levels.WARN)
+    return nil, nil, nil
+  end
+
+  local path = source_id(bufnr)
+  local ident = path or ("buf:" .. bufnr)
+  local dir = path and vim.fn.fnamemodify(path, ":h") or vim.fn.getcwd()
+  return ident, vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), dir
+end
+
+local function open_in_browser(path)
+  if vim.ui and vim.ui.open then
+    vim.ui.open(path)
+    return
+  end
+  -- Fallback for nvim < 0.10.
+  local opener
+  if vim.fn.has("macunix") == 1 then
+    opener = "open"
+  elseif vim.fn.has("unix") == 1 then
+    opener = "xdg-open"
+  elseif vim.fn.has("win32") == 1 or vim.fn.has("win64") == 1 then
+    opener = "explorer"
+  end
+  if not opener then
+    vim.notify("md-harpoon: no browser opener for this OS; upgrade nvim or set one manually",
+      vim.log.levels.ERROR)
+    return
+  end
+  vim.fn.jobstart({ opener, path }, { detach = true })
+end
+
+--- Convert a markdown source to standalone HTML and open it in the
+--- default browser. Source resolution mirrors the rest of the plugin:
+--- explicit `slot` / `path` / `buf` if given; otherwise the focused slot
+--- float (if any); otherwise the current buffer.
+---
+--- Pandoc is required (or whichever converter is configured). Wikilinks
+--- are preprocessed by default — `[[page]]` becomes
+--- `[page](page.html)` and `![[asset]]` becomes `![](asset)` — so the
+--- same file renders cleanly in both Obsidian and a browser.
+---
+---@param opts? { slot?: "1"|"2"|"3"|"a"|"s"|"d", path?: string, buf?: integer, css?: string, resolve_wikilinks?: boolean }
+function M.browser_open(opts)
+  opts = opts or {}
+
+  if vim.fn.executable(config.browser_converter) ~= 1 then
+    vim.notify(
+      ("md-harpoon: %s not found on PATH (required for browser export)"):format(config.browser_converter),
+      vim.log.levels.ERROR)
+    return
+  end
+
+  local source_ident, lines, source_dir = browser_resolve_source(opts)
+  if not source_ident then return end
+
+  local md = table.concat(lines, "\n")
+
+  local resolve = opts.resolve_wikilinks
+  if resolve == nil then resolve = config.browser_resolve_wikilinks end
+  if resolve then md = resolve_wikilinks(md) end
+
+  local args = {
+    config.browser_converter,
+    "--from=markdown",
+    "--to=html5",
+    "--standalone",
+    "--embed-resources",
+    "--resource-path=" .. source_dir,
+  }
+
+  local css = opts.css or config.browser_css
+  if css then
+    if css:match("%.css$") then
+      table.insert(args, "--css=" .. css)
+    else
+      table.insert(args, "--include-in-header=" .. css)
+    end
+  else
+    local default = ensure_default_css_file()
+    if default then
+      table.insert(args, "--include-in-header=" .. default)
+    end
+  end
+
+  -- Inject mermaid loader when needed. Modes: "auto" → only if source
+  -- has mermaid blocks; "on" → always; "off"/anything else → never.
+  local mermaid_mode = config.browser_mermaid or "auto"
+  local include_mermaid = mermaid_mode == "on"
+    or (mermaid_mode == "auto" and source_has_mermaid(md))
+  if include_mermaid then
+    local mh = ensure_mermaid_header_file()
+    if mh then
+      table.insert(args, "--include-in-header=" .. mh)
+    end
+  end
+
+  local result = vim.fn.system(args, md)
+  if vim.v.shell_error ~= 0 then
+    vim.notify("md-harpoon: pandoc failed:\n" .. result, vim.log.levels.ERROR)
+    return
+  end
+
+  local html_path = browser_html_path(source_ident)
+  local f = io.open(html_path, "w")
+  if not f then
+    vim.notify("md-harpoon: could not write " .. html_path, vim.log.levels.ERROR)
+    return
+  end
+  f:write(result)
+  f:close()
+
+  open_in_browser(html_path)
 end
 
 local function prompt_panel_and_render(path)
