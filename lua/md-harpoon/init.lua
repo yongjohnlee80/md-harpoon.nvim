@@ -294,6 +294,17 @@ local function open_slot(slot, source_bufnr)
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = "wipe"
 
+  -- Force normal mode on entry. The slot's keymap (e.g. <leader>m1) is
+  -- bound on `n`+`t` modes, so when invoked from a terminal-insert
+  -- buffer the `<cmd>...<cr>` mapping carries an "insert intent"
+  -- through the focus switch. Even though this buffer is
+  -- nomodifiable, single-keystroke navigation (h/j/k/l, gg/G, q to
+  -- close, <Home>/<End>/<PageUp>/<PageDown>) doesn't fire as n-mode
+  -- until the user presses <Esc>. Explicit stopinsert here is the
+  -- canonical fix — same pattern auto-agents.nvim's dock uses (commit
+  -- 31ac8ec on github.com/yongjohnlee80/auto-agents).
+  vim.cmd("stopinsert")
+
   -- auto_close = false so the float persists across WinEnter/CursorMoved.
   -- Required for slots to coexist while the user moves between sources.
   s.float_win:setup(win, { auto_close = false })
@@ -412,6 +423,7 @@ function M.focus(slot)
   local win = s.float_win.win
   if win and vim.api.nvim_win_is_valid(win) then
     vim.api.nvim_set_current_win(win)
+    vim.cmd("stopinsert")
     return
   end
   if s.source_bufnr and vim.api.nvim_buf_is_valid(s.source_bufnr) then
