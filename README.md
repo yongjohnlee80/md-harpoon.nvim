@@ -27,14 +27,26 @@ Reading and comparing several markdown documents at once without leaving Neovim 
 
 ## Install
 
-`md-harpoon` requires [`md-render.nvim`](https://github.com/delphinus/md-render.nvim) — it uses the `FloatWin` / `display_utils` / `preview.build_content` library API to do its rendering. Declare it as a dependency:
+`md-harpoon` has two hard dependencies as of v0.2.0:
+
+- [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
+  `^0.1.0` — foundation library for the AutoVim plugin family. Provides the
+  shared event bus, namespaced state store (per-project pin persistence),
+  and the global file-filter prefs (`auto-core.files`) that md-harpoon's
+  `find()` reads.
+- [`md-render.nvim`](https://github.com/delphinus/md-render.nvim) — does the
+  actual markdown rendering. md-harpoon wraps its `FloatWin` /
+  `display_utils` / `preview.build_content` library API to add the
+  multi-float layout and cursor memory.
 
 ### lazy.nvim
 
 ```lua
 {
   "yongjohnlee80/md-harpoon.nvim",
+  version = "^0.2.0",  -- v0.2.0 is the auto-core consumer release
   dependencies = {
+    "yongjohnlee80/auto-core.nvim",                        -- foundation library; hard dep as of v0.2.0
     { "delphinus/md-render.nvim", version = "*" },
   },
   ft = { "markdown", "markdown.mdx" },
@@ -60,6 +72,19 @@ Reading and comparing several markdown documents at once without leaving Neovim 
   },
 }
 ```
+
+> **Caret pin (`^0.2.0`)**: future v0.2.x releases auto-include without a
+> manual bump. The `auto-core` family follows an additive-only minor-bump
+> rule — no v0.X.Y release renames, removes, or break-shapes any existing
+> public surface. Crossing to a future v0.3.0 requires bumping the caret
+> deliberately.
+
+> **Per-project pins**: as of v0.2.0, slot pins + cursor positions persist
+> per-project via `auto-core.state.namespace("md-harpoon")`, keyed by
+> `sha256(workspace_root):sub(1,16)`. Switching worktrees / projects swaps
+> the active pin map automatically (subscribes to `worktree:switched` on
+> `auto-core.events`). First open in a project starts with empty slots;
+> subsequent restarts replay what you had loaded last time.
 
 ## Quick start
 
