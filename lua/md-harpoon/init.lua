@@ -90,6 +90,10 @@ local config = vim.deepcopy(DEFAULTS)
 ---@param opts? table
 function M.setup(opts)
   config = vim.tbl_deep_extend("force", vim.deepcopy(DEFAULTS), opts or {})
+  -- Late-bound dispatch via M.* picks up the function defined further
+  -- down in the file (after `State` is declared so its closures
+  -- capture the right upvalue).
+  M._wire_auto_core()
 end
 
 -- Top row uses digits (1/2/3) instead of q/w/e to avoid clashing with
@@ -126,6 +130,75 @@ local SLOT_LABELS = {
 ---@type table<string, MdHarpoonSlotState>
 local State = {}
 
+-- Idempotent auto-core wiring: claims the md-harpoon state.namespace,
+-- subscribes to worktree:switched (re-hydrate per-project pins), and
+-- subscribes to core.file:modified (live-refresh visible slots whose
+-- pinned source changed on disk). Soft-dep on auto-core — no-op when
+-- auto-core isn't installed.
+--
+-- Defined AFTER `State` so its inner closures (subscriber callbacks)
+-- capture `State` as an upvalue, not as a (nil) global. M.setup
+-- dispatches via `M._wire_auto_core()` which is late-bound table
+-- access — order of definition vs M.setup doesn't matter for that
+-- call, only for upvalue capture.
+local _wired = false
+function M._wire_auto_core()
+  if _wired then return end
+  local ok, core = pcall(require, "auto-core")
+  if not ok or type(core) ~= "table" or not core.events or not core.state then
+    return
+  end
+  _wired = true
+
+  pcall(function() require("md-harpoon.state").setup() end)
+
+  -- Worktree switch: per-workspace pin scope flips. Close every
+  -- open float (the prior workspace's docs aren't relevant in the
+  -- new one), clear the in-memory State so subsequent focus(slot)
+  -- rehydrates from the new workspace's pin map. No auto-open of
+  -- new pins — the user re-focuses manually if they want them.
+  core.events.subscribe("worktree:switched", function(payload)
+    pcall(function()
+      require("md-harpoon.state").workspace_changed(payload and payload.to)
+    end)
+    for _, slot in ipairs(M.SLOTS) do
+      local s = State[slot]
+      if s then
+        if s.float_win then s.float_win:close_if_valid() end
+        s.source_bufnr = nil
+        s.source_path = nil
+        s.last_cursor = nil
+      end
+    end
+  end)
+
+  -- Live refresh: when the pinned source file changes on disk, re-
+  -- render any visible slot whose source_path matches. Debounced
+  -- 150ms (matches auto-finder's fs-watch refresh cadence) so a
+  -- save burst doesn't fire one render per intermediate write.
+  local refresh_pending = {}
+  core.events.subscribe("core.file:*", function(payload, _topic)
+    if type(payload) ~= "table" or type(payload.path) ~= "string" then
+      return
+    end
+    for _, slot in ipairs(M.SLOTS) do
+      local s = State[slot]
+      if s and s.source_path == payload.path
+          and s.float_win and s.float_win.win
+          and vim.api.nvim_win_is_valid(s.float_win.win)
+          and not refresh_pending[slot] then
+        refresh_pending[slot] = true
+        vim.defer_fn(function()
+          refresh_pending[slot] = nil
+          if State[slot] and State[slot].source_path == payload.path then
+            pcall(M.render_path, slot, payload.path)
+          end
+        end, 150)
+      end
+    end
+  end)
+end
+
 local function ensure_slot(slot)
   assert(SLOT_POS[slot], "md-harpoon: unknown slot " .. tostring(slot))
   if not State[slot] then
@@ -135,6 +208,17 @@ local function ensure_slot(slot)
       source_path = nil,
       last_cursor = nil,
     }
+    -- Seed from auto-core.state.namespace per-project pin map (when
+    -- auto-core is installed). source_bufnr stays nil — bufnrs are
+    -- session-local; the next focus() will resolve source_path back
+    -- to a live buffer via bufadd + bufload.
+    pcall(function()
+      local pin = require("md-harpoon.state").get_pin(slot)
+      if pin and type(pin.source_path) == "string" then
+        State[slot].source_path = pin.source_path
+        State[slot].last_cursor = pin.last_cursor
+      end
+    end)
   end
   return State[slot]
 end
@@ -311,6 +395,20 @@ local function open_slot(slot, source_bufnr)
   s.source_bufnr = source_bufnr
   s.source_path = source_id(source_bufnr)
 
+  -- v0.X.0: persist this pin (per-workspace, keyed by core.workspace_root)
+  -- via auto-core.state.namespace + publish doc:pinned so siblings react.
+  pcall(function()
+    require("md-harpoon.state").set_pin(slot, {
+      source_path = s.source_path,
+      last_cursor = s.last_cursor,
+    })
+    require("auto-core").events.publish("doc:pinned", {
+      slot         = slot,
+      path         = s.source_path,
+      source_bufnr = source_bufnr,
+    })
+  end)
+
   for _, fold in ipairs(content.callout_folds) do
     fold_state[fold.source_line] = fold.collapsed
   end
@@ -429,6 +527,17 @@ function M.focus(slot)
   if s.source_bufnr and vim.api.nvim_buf_is_valid(s.source_bufnr) then
     open_slot(slot, s.source_bufnr)
     return
+  end
+  -- Rehydrate from a per-project pin: source_path is set (from
+  -- auto-core.state.namespace) but source_bufnr is nil (bufnrs are
+  -- session-local). Resolve the path back to a live buffer.
+  if s.source_path and vim.fn.filereadable(s.source_path) == 1 then
+    local bufnr = vim.fn.bufadd(s.source_path)
+    vim.fn.bufload(bufnr)
+    if is_markdown(bufnr) then
+      open_slot(slot, bufnr)
+      return
+    end
   end
   open_slot(slot, vim.api.nvim_get_current_buf())
 end
@@ -777,24 +886,44 @@ end
 --- available; falls back to a `vim.fn.glob` + `vim.ui.select` list
 --- otherwise (no fuzzy match in fallback — install snacks.nvim for the
 --- real experience).
----@param opts? { cwd?: string }
+---@param opts? { cwd?: string, picker?: table }
 function M.find(opts)
   opts = opts or {}
   local cwd = opts.cwd or vim.fn.getcwd()
 
   local ok, snacks = pcall(require, "snacks")
   if ok and snacks.picker then
-    snacks.picker.files({
-      cwd = cwd,
-      ft = "md",
-      title = "Markdown files",
-      confirm = function(picker, item)
-        picker:close()
-        if item and item.file then
-          vim.schedule(function() prompt_panel_and_render(item.file) end)
-        end
-      end,
-    })
+    -- Read the canonical file-filter prefs from auto-core.files.
+    -- Snacks's `hidden` opt covers dotfiles (`.foo`); `ignored`
+    -- covers gitignored. Both default to TRUE in auto-core (show
+    -- everything by default — KB notes typically live under dot
+    -- dirs, dotfiles need to be reachable). Soft-dep: when
+    -- auto-core isn't installed, fall back to showing both (the
+    -- prior behavior of bare snacks defaults).
+    local auto_show_hidden, auto_show_dotfiles = true, true
+    local ok_core, core = pcall(require, "auto-core")
+    if ok_core and core and core.files then
+      auto_show_hidden   = core.files.get_show_hidden()
+      auto_show_dotfiles = core.files.get_show_dotfiles()
+    end
+    -- Layered opts: auto-core canonical prefs at the bottom; user's
+    -- per-call `opts.picker` overrides on top; non-overridable
+    -- final defaults (cwd / ft / title / confirm) last.
+    local picker_opts = vim.tbl_deep_extend("force",
+      { hidden = auto_show_dotfiles, ignored = auto_show_hidden },
+      opts.picker or {},
+      {
+        cwd = cwd,
+        ft = "md",
+        title = "Markdown files",
+        confirm = function(picker, item)
+          picker:close()
+          if item and item.file then
+            vim.schedule(function() prompt_panel_and_render(item.file) end)
+          end
+        end,
+      })
+    snacks.picker.files(picker_opts)
     return
   end
 
