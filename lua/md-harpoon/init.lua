@@ -152,6 +152,14 @@ function M._wire_auto_core()
 
   pcall(function() require("md-harpoon.state").setup() end)
 
+  -- Register md-harpoon-owned mailbox commands (harpoon_attach,
+  -- harpoon_view, harpoon_render_browser) into auto-core's command
+  -- whitelist so peer agents can drive the harpoon via outgoing
+  -- `kind="command"` messages to the `nvim` executioner. No-op when
+  -- the mailbox subsystem isn't available (auto-core present but
+  -- without mailbox, or stub install).
+  pcall(function() require("md-harpoon.mailbox.commands").register_all() end)
+
   -- Worktree switch: per-workspace pin scope flips. Close every
   -- open float (the prior workspace's docs aren't relevant in the
   -- new one), clear the in-memory State so subsequent focus(slot)
