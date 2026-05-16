@@ -2,6 +2,99 @@
 
 All notable changes to `md-harpoon.nvim` are documented here.
 
+## [v0.2.2] — 2026-05-16 — ADR 0021 Phase 2 wrapper + smoke harness rtp fix
+
+Internal refactor. Every previously hand-prefixed `vim.notify(
+"md-harpoon: …")` call now flows through `lua/md-harpoon/log.lua`
+so the auto-core ring captures the entry for `:AutoCoreLog`
+triage. Toast surface is unchanged at every call site.
+
+### Added — `lua/md-harpoon/log.lua`
+
+Per ADR 0021 §6, every auto-family plugin owns one
+`lua/<plugin>/log.lua` that delegates to `auto-core.log`. Feature
+code in md-harpoon now calls `require("md-harpoon.log")`
+exclusively; `auto-core.log` is reachable only through the
+wrapper.
+
+Exposes:
+
+```lua
+local log = require("md-harpoon.log")
+
+log.error / .warn / .info / .debug / .trace  -- with md-harpoon.* component prefix
+log.notify(msg, opts?)                        -- force-toast single emission
+log.notifyIf(event, msg, opts?)               -- toast iff event subscribed
+log.register_events(events)                   -- declare at setup
+log.is_level_enabled(name)                    -- predicate
+```
+
+Soft-dep tolerant: when running against an auto-core older than
+v0.1.11 (no `notify` / `notifyIf` / `events.register`), the
+wrapper degrades to ring-only emissions and a
+`[md-harpoon.<component>] <msg>` bare `vim.notify` fallback so
+users without auto-core keep the v0.2.x toast surface.
+
+### Changed — swept 13 bare `vim.notify` call sites
+
+- `lua/md-harpoon/init.lua` (12 sites) — `open_slot`,
+  `render_path`, `browser_resolve_source`, `open_in_browser`,
+  `browser_open`, `find`. Each call site now routes through
+  `log.<level>(component, msg)` with the literal `"md-harpoon: "`
+  message prefix dropped (auto-core's
+  `[AutoCore] [md-harpoon.<component>] [LEVEL]` formatting
+  replaces it).
+- `lua/md-harpoon/mailbox/commands.lua` (1 site) — the
+  register-failed WARN now goes through
+  `log.warn("mailbox.commands", …)`.
+
+### Changed — `tests/smoke.lua` rtp prelude fixed
+
+Latent bug surfaced by the Phase 2 work: the prelude hardcoded
+`/home/johno/Source/Projects/nvim-plugins/md-harpoon.nvim` as an
+rtp entry, but that's the BARE repo dir (no `lua/` underneath —
+modules live in each worktree). The `require("md-harpoon")`
+call therefore picked up whichever `~/.local/share/nvim/lazy/
+md-harpoon.nvim` happened to be installed instead of the suite's
+own working copy. Same family of bugs caught + codified in
+`lua-nvim-plugin-development.md` rule 2.
+
+Fixed: derive `plugin_root` from the smoke script's own path
+(`:h:h:h` lands on the family workspace dir), iterate candidate
+rtp entries with explicit `isdirectory` guards + visible WARN on
+missing deps, list the canonical dev tip LAST so its prepend
+wins.
+
+### Tests
+
+`tests/smoke.lua` 24 passed, 0 failed. No new assertions — this
+is a routing change with byte-identical observable behavior at
+every call site. The rtp prelude fix is its own load-bearing
+improvement: the suite is now self-locating instead of
+dependent on absolute paths matching one developer's machine.
+
+### Migration
+
+Soft. Consumers pin via `version = "^0.2.0"` and auto-update.
+The wrapper soft-deps against pre-Phase-1 auto-core so consumers
+can stage the upgrade in any order.
+
+## [v0.2.1] — 2026-05-15 — register mailbox commands with auto-core
+
+Adds `lua/md-harpoon/mailbox/commands.lua`, exposing three verbs
+to auto-core's mailbox command registry:
+
+- `harpoon_attach`        — pin a markdown path into a slot
+- `view`                  — render a slot
+- `render_browser`        — convert + open in default browser
+
+Plus a tiny docs touch-up on the v0.2.0 install instructions
+clarifying the auto-core hard dep + caret-pin guidance for
+consumers pinning at `^0.1.0`.
+
+(Tag landed at the time but a CHANGELOG entry was missed —
+backfilled here for the v0.2.2 cut.)
+
 ## [v0.2.0] — 2026-05-10 — auto-core consumer
 
 First release on top of [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
