@@ -11,14 +11,35 @@
 -- state + events + filter wiring instead. Live verification of the
 -- 6-pane float layout is the user's daily flow.
 
+-- Derive plugin_root from the smoke script's own path so the driver
+-- runs on any machine. `tests/smoke.lua` is two `:h` levels below
+-- the worktree root (e.g. `…/md-harpoon.nvim/comms-1`). The bare-
+-- repo top (`…/md-harpoon.nvim/`) does NOT contain `lua/` — modules
+-- live under each worktree. The family workspace dir (parent of
+-- bare repo) needs `:h:h:h`. Surfaced + codified as
+-- `lua-nvim-plugin-development.md` rule 2 / synthesis L11 on
+-- 2026-05-16.
+local plugin_root = vim.fn.fnamemodify(
+  vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h")
+local plugins_workspace = vim.fn.fnamemodify(plugin_root, ":h:h")
+
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
+-- Each candidate prepends in order — LAST prepend wins, so list the
+-- canonical / development tip last.
 for _, p in ipairs({
-  "/home/johno/Source/Projects/nvim-plugins/md-harpoon.nvim",
-  "/home/johno/Source/Projects/nvim-plugins/auto-core.nvim",
   LAZY .. "/plenary.nvim",
   LAZY .. "/md-render.nvim",  -- soft-dep used by open_slot only
+  plugins_workspace .. "/auto-core.nvim/main",
+  plugins_workspace .. "/auto-core.nvim/comms-2",  -- post-v0.1.11 dev tip
+  plugin_root,
 }) do
-  vim.opt.runtimepath:prepend(p)
+  if vim.fn.isdirectory(p) == 1 then
+    vim.opt.runtimepath:prepend(p)
+  else
+    -- Visible warning rather than silent fallback (rule 2 §smoke-rtp).
+    vim.notify("smoke: rtp candidate not found: " .. p,
+      vim.log.levels.WARN)
+  end
 end
 
 vim.o.columns = 200

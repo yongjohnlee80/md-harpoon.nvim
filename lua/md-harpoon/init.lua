@@ -322,7 +322,7 @@ end
 local function open_slot(slot, source_bufnr)
   local s = ensure_slot(slot)
   if not is_markdown(source_bufnr) then
-    vim.notify("md-harpoon: buffer is not markdown", vim.log.levels.WARN)
+    require("md-harpoon.log").warn("open", "buffer is not markdown")
     return
   end
 
@@ -503,7 +503,7 @@ end
 function M.render_path(slot, path)
   local resolved = vim.fn.expand(path)
   if vim.fn.filereadable(resolved) ~= 1 then
-    vim.notify("md-harpoon: file not readable: " .. resolved, vim.log.levels.WARN)
+    require("md-harpoon.log").warn("render", "file not readable: " .. resolved)
     return
   end
   local s = ensure_slot(slot)
@@ -716,8 +716,8 @@ local function browser_resolve_source(opts)
   if opts.slot then
     local s = State[opts.slot]
     if not s or not s.source_path then
-      vim.notify("md-harpoon: slot " .. opts.slot .. " has no remembered source",
-        vim.log.levels.WARN)
+      require("md-harpoon.log").warn("browser",
+        "slot " .. opts.slot .. " has no remembered source")
       return nil, nil, nil
     end
     -- Prefer the live buffer (may have unsaved edits) over the on-disk file.
@@ -726,8 +726,8 @@ local function browser_resolve_source(opts)
       return s.source_path, lines, vim.fn.fnamemodify(s.source_path, ":h")
     end
     if vim.fn.filereadable(s.source_path) ~= 1 then
-      vim.notify("md-harpoon: slot source file not readable: " .. s.source_path,
-        vim.log.levels.WARN)
+      require("md-harpoon.log").warn("browser",
+        "slot source file not readable: " .. s.source_path)
       return nil, nil, nil
     end
     return s.source_path, vim.fn.readfile(s.source_path), vim.fn.fnamemodify(s.source_path, ":h")
@@ -737,7 +737,7 @@ local function browser_resolve_source(opts)
   if opts.path then
     local resolved = vim.fn.expand(opts.path)
     if vim.fn.filereadable(resolved) ~= 1 then
-      vim.notify("md-harpoon: file not readable: " .. resolved, vim.log.levels.WARN)
+      require("md-harpoon.log").warn("browser", "file not readable: " .. resolved)
       return nil, nil, nil
     end
     return resolved, vim.fn.readfile(resolved), vim.fn.fnamemodify(resolved, ":h")
@@ -747,7 +747,7 @@ local function browser_resolve_source(opts)
   local bufnr = opts.buf
   if bufnr then
     if not vim.api.nvim_buf_is_valid(bufnr) then
-      vim.notify("md-harpoon: invalid buffer", vim.log.levels.WARN)
+      require("md-harpoon.log").warn("browser", "invalid buffer")
       return nil, nil, nil
     end
   else
@@ -765,7 +765,7 @@ local function browser_resolve_source(opts)
   end
 
   if not is_markdown(bufnr) then
-    vim.notify("md-harpoon: buffer is not markdown", vim.log.levels.WARN)
+    require("md-harpoon.log").warn("browser", "buffer is not markdown")
     return nil, nil, nil
   end
 
@@ -790,8 +790,8 @@ local function open_in_browser(path)
     opener = "explorer"
   end
   if not opener then
-    vim.notify("md-harpoon: no browser opener for this OS; upgrade nvim or set one manually",
-      vim.log.levels.ERROR)
+    require("md-harpoon.log").error("browser",
+      "no browser opener for this OS; upgrade nvim or set one manually")
     return
   end
   vim.fn.jobstart({ opener, path }, { detach = true })
@@ -812,9 +812,9 @@ function M.browser_open(opts)
   opts = opts or {}
 
   if vim.fn.executable(config.browser_converter) ~= 1 then
-    vim.notify(
-      ("md-harpoon: %s not found on PATH (required for browser export)"):format(config.browser_converter),
-      vim.log.levels.ERROR)
+    require("md-harpoon.log").error("browser",
+      ("%s not found on PATH (required for browser export)")
+        :format(config.browser_converter))
     return
   end
 
@@ -864,14 +864,14 @@ function M.browser_open(opts)
 
   local result = vim.fn.system(args, md)
   if vim.v.shell_error ~= 0 then
-    vim.notify("md-harpoon: pandoc failed:\n" .. result, vim.log.levels.ERROR)
+    require("md-harpoon.log").error("browser", "pandoc failed:\n" .. result)
     return
   end
 
   local html_path = browser_html_path(source_ident)
   local f = io.open(html_path, "w")
   if not f then
-    vim.notify("md-harpoon: could not write " .. html_path, vim.log.levels.ERROR)
+    require("md-harpoon.log").error("browser", "could not write " .. html_path)
     return
   end
   f:write(result)
@@ -944,7 +944,7 @@ function M.find(opts)
     end
   end
   if #files == 0 then
-    vim.notify("md-harpoon: no markdown files under " .. cwd, vim.log.levels.WARN)
+    require("md-harpoon.log").warn("find", "no markdown files under " .. cwd)
     return
   end
   vim.ui.select(files, {

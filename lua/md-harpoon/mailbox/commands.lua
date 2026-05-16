@@ -153,10 +153,8 @@ function M.register_all()
       out.registered[#out.registered + 1] = name
     else
       out.skipped[#out.skipped + 1] = name
-      vim.notify(
-        string.format("md-harpoon mailbox.commands.register('%s') failed: %s",
-          name, tostring(rerr)),
-        vim.log.levels.WARN)
+      require("md-harpoon.log").warn("mailbox.commands",
+        string.format("register('%s') failed: %s", name, tostring(rerr)))
     end
   end
   return out
