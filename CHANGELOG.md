@@ -2,6 +2,39 @@
 
 All notable changes to `md-harpoon.nvim` are documented here.
 
+## [v0.2.3] — 2026-09-05 — CI on every PR
+
+Patch. No Lua surface changed at all — this release is the gate and the
+runner contract, nothing else.
+
+**The repo's first automated gate.** `tests/run-all.sh` (added since
+v0.2.2) already turns a silent abort into a loud failure by treating a
+missing summary line as a hard failure; CI supplies the environment and
+lets the runner be the judge.
+
+The workflow is built from the corrected family shape rather than the
+first one written:
+
+- **No branch-restoring step and no `fetch-depth: 0`.** `smoke.lua`
+  reads none of this repository's refs. That step is also the one thing
+  that behaves differently per trigger entry — `actions/checkout`
+  detaches on `pull_request` and checks the branch out on `push`, so
+  `git branch --force main` exits 128 there — and an entry whose first
+  firing is the merge cannot be witnessed beforehand. Removing the
+  per-entry difference beats testing it.
+- **Concurrency is scoped by EVENT.** `github.ref` alone puts a
+  scheduled run in the same group as a push to main, because on a
+  schedule event that ref IS the default branch; a merge would then
+  cancel the weekly run, and a cancelled run reports nothing rather than
+  failing. `cancel-in-progress` is limited to `pull_request`.
+- **Dependencies are pinned by commit** and installed by one shared
+  script both jobs call, so the only thing that can differ between them
+  is a ref. `md-render` is a soft dependency and a THIRD-PARTY repo
+  (`delphinus/`, not ours); the script says so.
+- **A `drift` job** resolves auto-core at its default branch on schedule
+  and manual dispatch only, so a pinned consumer can still observe an
+  upstream regression without reddening an unrelated PR.
+
 ## [v0.2.2] — 2026-05-16 — ADR 0021 Phase 2 wrapper + smoke harness rtp fix
 
 Internal refactor. Every previously hand-prefixed `vim.notify(
