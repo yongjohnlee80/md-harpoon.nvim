@@ -14,10 +14,21 @@ on:
 permissions:
   contents: read
 
-# A superseded run proves nothing about the head that replaced it.
+# The EVENT is part of the group, and cancellation is limited to PRs.
+#
+# `github.ref` alone is not enough: on a `schedule` event it is the DEFAULT
+# BRANCH ref — the same value a push to main has — so a merge landing during
+# the Monday drift run would cancel it. A cancelled run is not a failure: it
+# reports nothing and looks like nothing happened, which is precisely how a
+# drift signal stops arriving without anyone noticing. That is the same failure
+# the drift job exists to prevent, arriving by another route. (gold-man, r1 O3.)
+#
+# cancel-in-progress is kept for pull_request, where a superseded run proves
+# nothing about the head that replaced it, and dropped everywhere else, where
+# each commit deserves its own verdict.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # md-harpoon had no automated gate. `tests/run-all.sh` already turns a silent
 # abort into a loud failure — it parses the summary line and treats its ABSENCE
