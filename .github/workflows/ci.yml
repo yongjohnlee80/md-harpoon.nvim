@@ -4,74 +4,140 @@ on:
   push:
     branches: [main]
   pull_request:
+  # For the `drift` job below only — it must not run on a PR, and a schedule
+  # cannot be triggered by hand when you want to check it.
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
+  workflow_dispatch:
 
-# md-harpoon.nvim had no automated gate: its suites ran only where someone happened to
-# run them. This follows the pattern established in auto-core.nvim and autodb
-# rather than inventing a third: supply the environment, then let
-# tests/run-all.sh be the judge — it already treats a missing
-# "<P> passed, <F> failed" summary as a hard failure, which is the only thing
-# that catches a C-level crash mid-suite.
+# Least privilege: these jobs only read the tree.
+permissions:
+  contents: read
+
+# A superseded run proves nothing about the head that replaced it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# md-harpoon had no automated gate. `tests/run-all.sh` already turns a silent
+# abort into a loud failure — it parses the summary line and treats its ABSENCE
+# as a hard failure. CI does not reimplement that; it supplies the environment
+# and lets the runner be the judge.
 jobs:
   lua:
     runs-on: ubuntu-latest
+    # No pty suite here (auto-core's timeout exists for its pty deadlock todo;
+    # this repo has no tests/ui). This bounds a job that hangs for any other
+    # reason rather than letting it burn the runner's full allowance.
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-        with:
-          # The suites inspect this repository through auto-core.git.*; a
-          # shallow clone hides refs they read.
-          fetch-depth: 0
-
-      # actions/checkout leaves a DETACHED HEAD with no local branches, which is
-      # not a shape any real clone has. auto-core.nvim's first CI run failed on
-      # exactly this: assertions that read refs/heads legitimately saw nothing.
-      - name: restore a realistic repo shape (local default branch)
-        run: |
-          git branch --force main origin/main \
-            || git fetch --no-tags origin +refs/heads/main:refs/heads/main
-          git branch --list
+      # Pinned by commit SHA, not by tag: a tag can be moved to different code
+      # under the same name.
+      #
+      # Deliberately NO fetch-depth: 0, and no step that manufactures a local
+      # default branch. auto-core's workflow needs both because its suites read
+      # this repository's own refs; smoke.lua here reads none — zero uses of
+      # default_branch / local_branch_exists / list_branches, and no git
+      # inspection of the checkout at all.
+      #
+      # That deletion is not only smaller — it removes the defect CLASS. The
+      # branch step was the one thing in this workflow that behaved differently
+      # per trigger entry (actions/checkout leaves a detached HEAD on
+      # pull_request and checks the branch out on push, so `git branch --force
+      # main` exits 128 there under bash -e). With it gone, `push` and
+      # `pull_request` run identical code, and the entry whose first firing is
+      # the merge is no longer an entry that can fail on its own.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: install neovim
         env:
           # Pinned by VERSION AND CHECKSUM. A GitHub release asset can be
           # replaced under the same tag and name, so the version alone is not
           # reproducible; the SHA-256 is the real pin. v0.12.5 is the version
-          # this suite's baseline was verified against locally.
+          # this suite was verified against locally. Recompute when bumping.
           NVIM_VERSION: "v0.12.5"
           NVIM_SHA256: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
         run: |
-          curl -fsSL -o /tmp/nvim.tar.gz \
+          # --retry: a transient network blip should not fail a PR for reasons
+          # unrelated to its change.
+          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/nvim.tar.gz \
             "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
           echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
           sudo tar -C /opt -xzf /tmp/nvim.tar.gz
           echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      # auto-core is resolved from a SIBLING WORKTREE, not the lazy dir: the
-      # suite computes plugins_root two levels above its own checkout and looks
-      # for <plugins_root>/auto-core.nvim/main, mirroring the developer machine
-      # layout. Cloning it into the lazy dir does NOT satisfy that — the first
-      # run of this workflow failed with "module 'auto-core' not found" for
-      # exactly that reason. Everything else IS resolved from the lazy dir.
-      #
       # All pinned by commit, so an upstream change cannot become a mystery
-      # failure on an unrelated PR here.
+      # failure on an unrelated PR here. The cost of that pin — a consumer
+      # frozen against its dependency can never observe an upstream regression —
+      # is paid by the `drift` job below, not by weakening this one.
       - name: install plugin dependencies
+        env:
+          AUTO_CORE_REF: "bc4d998bc22f0644b80e3e89cfe3e1b92d71d32a"  # main @ v0.2.15
+          PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
+          MD_RENDER_REF: "957fe64ab8244772d7d61f9b402c6ac0fd085928"
+        run: ./.github/install-deps.sh
+
+      # Named "assert", not "verify", because it CAN fail: it compares the
+      # running nvim against the pin. A step named "verify" that only prints a
+      # version and checks a directory exists is the present-and-blind shape —
+      # it converts "nobody checked" into "checked and fine".
+      - name: assert the toolchain matches the pin
+        env:
+          NVIM_VERSION: "v0.12.5"
         run: |
-          lazy="$HOME/.local/share/nvim/lazy"
-          mkdir -p "$lazy"
-          # <plugins_root> == dirname(dirname($GITHUB_WORKSPACE)); the checkout
-          # lives at /home/runner/work/<repo>/<repo>.
+          got="$(nvim --version | head -1 | awk '{print $2}')"
+          echo "nvim: $got (pinned $NVIM_VERSION)"
+          test "$got" = "$NVIM_VERSION"
+          test -d "$HOME/.local/share/nvim/lazy/plenary.nvim"
+          test -d "$HOME/.local/share/nvim/lazy/md-render.nvim"
+
+      - name: tests/run-all.sh
+        run: ./tests/run-all.sh
+
+  # CONSUMER DRIFT (gold-man r0, O1).
+  #
+  # The stated reason auto-core got CI first is that a regression there reaches
+  # its consumers before anyone notices — and a consumer pinned to a frozen
+  # auto-core is precisely the thing that cannot notice. Both properties are
+  # wanted and they conflict, so they are split rather than traded: `lua` pins
+  # and gates, this resolves auto-core at its DEFAULT BRANCH.
+  #
+  # Schedule and manual dispatch ONLY — deliberately not `push`. On push it
+  # would redden the merge run for an upstream change that has nothing to do
+  # with the PR being merged, and it would put a code path on the merge that no
+  # PR run ever exercised.
+  drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: install neovim
+        env:
+          NVIM_VERSION: "v0.12.5"
+          NVIM_SHA256: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
+          echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
+          sudo tar -C /opt -xzf /tmp/nvim.tar.gz
+          echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      # The ONE difference from `lua`: auto-core rides its default branch.
+      # Everything else — including the other two pins — stays fixed, so a
+      # failure here names auto-core and not "something moved".
+      - name: install plugin dependencies (auto-core at HEAD)
+        env:
+          AUTO_CORE_REF: ""   # empty => default branch
+          PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
+          MD_RENDER_REF: "957fe64ab8244772d7d61f9b402c6ac0fd085928"
+        run: ./.github/install-deps.sh
+
+      - name: report which auto-core is under test
+        run: |
           siblings="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
-          clone() {
-            git clone --filter=blob:none "$1" "$lazy/$2"
-            git -C "$lazy/$2" checkout "$3"
-          }
-          clone_sibling() {
-            git clone --filter=blob:none "$1" "$siblings/$2/main"
-            git -C "$siblings/$2/main" checkout "$3"
-          }
-          clone_sibling https://github.com/yongjohnlee80/auto-core.nvim auto-core.nvim c4083102029acb9672741efa7234707897d54be7
-          clone https://github.com/nvim-lua/plenary.nvim plenary.nvim 74b06c6c75e4eeb3108ec01852001636d85a932b
-          clone https://github.com/delphinus/md-render.nvim md-render.nvim 957fe64ab8244772d7d61f9b402c6ac0fd085928
+          git -C "$siblings/auto-core.nvim/main" log --oneline -1
 
       - name: tests/run-all.sh
         run: ./tests/run-all.sh
