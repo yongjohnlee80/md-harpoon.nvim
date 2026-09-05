@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# md-harpoon.nvim had no automated gate: its suites ran only where someone happened to
+# run them. This follows the pattern established in auto-core.nvim and autodb
+# rather than inventing a third: supply the environment, then let
+# tests/run-all.sh be the judge — it already treats a missing
+# "<P> passed, <F> failed" summary as a hard failure, which is the only thing
+# that catches a C-level crash mid-suite.
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The suites inspect this repository through auto-core.git.*; a
+          # shallow clone hides refs they read.
+          fetch-depth: 0
+
+      # actions/checkout leaves a DETACHED HEAD with no local branches, which is
+      # not a shape any real clone has. auto-core.nvim's first CI run failed on
+      # exactly this: assertions that read refs/heads legitimately saw nothing.
+      - name: restore a realistic repo shape (local default branch)
+        run: |
+          git branch --force main origin/main \
+            || git fetch --no-tags origin +refs/heads/main:refs/heads/main
+          git branch --list
+
+      - name: install neovim
+        env:
+          # Pinned by VERSION AND CHECKSUM. A GitHub release asset can be
+          # replaced under the same tag and name, so the version alone is not
+          # reproducible; the SHA-256 is the real pin. v0.12.5 is the version
+          # this suite's baseline was verified against locally.
+          NVIM_VERSION: "v0.12.5"
+          NVIM_SHA256: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
+        run: |
+          curl -fsSL -o /tmp/nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
+          echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
+          sudo tar -C /opt -xzf /tmp/nvim.tar.gz
+          echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      # The suites resolve dependencies from a SIBLING worktree first and fall
+      # back to the lazy dir. CI has no siblings, so the lazy dir is the path
+      # taken — populate exactly the set the local baseline ran with, pinned by
+      # commit so an upstream change cannot turn into a mystery failure here.
+      - name: install plugin dependencies
+        run: |
+          lazy="$HOME/.local/share/nvim/lazy"
+          mkdir -p "$lazy"
+          clone() {
+            git clone --filter=blob:none "$1" "$lazy/$2"
+            git -C "$lazy/$2" checkout "$3"
+          }
+          clone https://github.com/yongjohnlee80/auto-core.nvim auto-core.nvim c4083102029acb9672741efa7234707897d54be7
+          clone https://github.com/nvim-lua/plenary.nvim plenary.nvim 74b06c6c75e4eeb3108ec01852001636d85a932b
+          clone https://github.com/delphinus/md-render.nvim md-render.nvim 957fe64ab8244772d7d61f9b402c6ac0fd085928
+
+      - name: tests/run-all.sh
+        run: ./tests/run-all.sh
