@@ -45,19 +45,31 @@ jobs:
           sudo tar -C /opt -xzf /tmp/nvim.tar.gz
           echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
 
-      # The suites resolve dependencies from a SIBLING worktree first and fall
-      # back to the lazy dir. CI has no siblings, so the lazy dir is the path
-      # taken — populate exactly the set the local baseline ran with, pinned by
-      # commit so an upstream change cannot turn into a mystery failure here.
+      # auto-core is resolved from a SIBLING WORKTREE, not the lazy dir: the
+      # suite computes plugins_root two levels above its own checkout and looks
+      # for <plugins_root>/auto-core.nvim/main, mirroring the developer machine
+      # layout. Cloning it into the lazy dir does NOT satisfy that — the first
+      # run of this workflow failed with "module 'auto-core' not found" for
+      # exactly that reason. Everything else IS resolved from the lazy dir.
+      #
+      # All pinned by commit, so an upstream change cannot become a mystery
+      # failure on an unrelated PR here.
       - name: install plugin dependencies
         run: |
           lazy="$HOME/.local/share/nvim/lazy"
           mkdir -p "$lazy"
+          # <plugins_root> == dirname(dirname($GITHUB_WORKSPACE)); the checkout
+          # lives at /home/runner/work/<repo>/<repo>.
+          siblings="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
           clone() {
             git clone --filter=blob:none "$1" "$lazy/$2"
             git -C "$lazy/$2" checkout "$3"
           }
-          clone https://github.com/yongjohnlee80/auto-core.nvim auto-core.nvim c4083102029acb9672741efa7234707897d54be7
+          clone_sibling() {
+            git clone --filter=blob:none "$1" "$siblings/$2/main"
+            git -C "$siblings/$2/main" checkout "$3"
+          }
+          clone_sibling https://github.com/yongjohnlee80/auto-core.nvim auto-core.nvim c4083102029acb9672741efa7234707897d54be7
           clone https://github.com/nvim-lua/plenary.nvim plenary.nvim 74b06c6c75e4eeb3108ec01852001636d85a932b
           clone https://github.com/delphinus/md-render.nvim md-render.nvim 957fe64ab8244772d7d61f9b402c6ac0fd085928
 
