@@ -2,6 +2,20 @@
 
 All notable changes to `md-harpoon.nvim` are documented here.
 
+## [Unreleased] — an open slot watches its own file
+
+Patch. The live refresh (an open slot re-renders when its file changes on disk)
+listened to `core.file:*`, which arrived only because auto-finder's files pane
+watched the whole cwd recursively. auto-finder's rebuilt files slot (its
+ADR-0200) watches only the directories expanded in it, so a slot's file would
+stop refreshing — and a file outside the cwd never refreshed at all.
+
+`md-harpoon.watch` now holds one non-recursive `auto-core.fs.watch` per
+directory while an open slot shows a file in it, and releases it when the float
+closes (including `close_all` and a worktree switch). At most six handles, none
+while no slot is open. `tests/pin-watch.lua` counts the live handles and drives
+an external write through the real render path.
+
 ## [v0.2.3] — 2026-09-05 — CI on every PR
 
 Patch. No Lua surface changed at all — this release is the gate and the

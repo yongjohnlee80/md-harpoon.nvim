@@ -181,9 +181,10 @@ function M._wire_auto_core()
   end)
 
   -- Live refresh: when the pinned source file changes on disk, re-
-  -- render any visible slot whose source_path matches. Debounced
-  -- 150ms (matches auto-finder's fs-watch refresh cadence) so a
-  -- save burst doesn't fire one render per intermediate write.
+  -- render any visible slot whose source_path matches. The events come
+  -- from md-harpoon.watch, which watches each open slot's directory.
+  -- Debounced 150ms so a save burst doesn't fire one render per
+  -- intermediate write.
   local refresh_pending = {}
   core.events.subscribe("core.file:*", function(payload, _topic)
     if type(payload) ~= "table" or type(payload.path) ~= "string" then
@@ -402,6 +403,9 @@ local function open_slot(slot, source_bufnr)
   s.float_win:setup(win, { auto_close = false })
   s.source_bufnr = source_bufnr
   s.source_path = source_id(source_bufnr)
+  -- The live refresh needs core.file:* for this file's directory; nothing else watches it (ADR-0200).
+  -- Held while this float is open, released when it closes.
+  require("md-harpoon.watch").hold(slot, s.source_path, win)
 
   -- v0.X.0: persist this pin (per-workspace, keyed by core.workspace_root)
   -- via auto-core.state.namespace + publish doc:pinned so siblings react.
