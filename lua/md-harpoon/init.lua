@@ -197,9 +197,15 @@ function M._wire_auto_core()
           and vim.api.nvim_win_is_valid(s.float_win.win)
           and not refresh_pending[slot] then
         refresh_pending[slot] = true
+        -- The float the event was for: a close (or close_all) inside the debounce window keeps
+        -- source_path remembered on purpose, so re-checking the path alone would reopen a float the
+        -- user just closed.
+        local win = s.float_win.win
         vim.defer_fn(function()
           refresh_pending[slot] = nil
-          if State[slot] and State[slot].source_path == payload.path then
+          local cur = State[slot]
+          if cur and cur.source_path == payload.path
+              and cur.float_win.win == win and vim.api.nvim_win_is_valid(win) then
             pcall(M.render_path, slot, payload.path)
           end
         end, 150)

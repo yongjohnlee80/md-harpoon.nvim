@@ -44,6 +44,8 @@ ok("the loaded md-harpoon.watch is this worktree's",
 
 local fs_watch = require("auto-core.fs.watch")
 local mh = require("md-harpoon")
+-- a marker that the core.file event reached subscribers (the ordering cells close right after it)
+require("auto-core").events.subscribe("core.file:*", function() _G.__pinwatch_seen = true end)
 local watch = require("md-harpoon.watch")
 mh.setup({})
 
@@ -128,6 +130,24 @@ ok("precondition: slot 3 open, one handle", slot_win("3") ~= nil and live(DIR) =
 require("auto-core").events.publish("worktree:switched", { from = "/tmp/a", to = "/tmp/b" })
 wait(function() return live(DIR) == 0 end, 1000)
 ok("worktree:switched closes the floats and releases their handles", live(DIR) == 0 and #watch.dirs() == 0, live(DIR))
+
+print("\n[5b] a close inside the refresh debounce stays closed")
+for _, how in ipairs({ "close", "close_all" }) do
+  real_render("d", NOTE)
+  local w = slot_win("d")
+  ok("precondition (" .. how .. "): slot d open, one handle", w ~= nil and live(DIR) == 1)
+  spy_on()
+  refreshes, _G.__pinwatch_seen = {}, nil
+  vim.fn.writefile({ "# note", "", "race " .. how }, NOTE)
+  -- close right after the event reached the subscribers, i.e. inside the 150 ms refresh debounce
+  ok("precondition (" .. how .. "): the write's core.file event arrived",
+    wait(function() return _G.__pinwatch_seen == true end, 1500))
+  if how == "close" then vim.api.nvim_win_close(w, true) else mh.close_all() end
+  vim.wait(500)
+  ok(how .. " inside the debounce: no re-render, the float stays closed, no handle",
+    #refreshes == 0 and slot_win("d") == nil and live(DIR) == 0, vim.inspect({ refreshes, live(DIR) }))
+  spy_off()
+end
 
 print("\n[6] the guard fires: a hold released by a stale float close would leak the new one")
 real_render("s", NOTE)
