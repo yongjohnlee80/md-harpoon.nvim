@@ -2,9 +2,9 @@
 
 All notable changes to `md-harpoon.nvim` are documented here.
 
-## [Unreleased] — an open slot watches its own file
+## [v0.2.4] — 2026-09-27 — an open slot watches its own file
 
-Patch. The live refresh (an open slot re-renders when its file changes on disk)
+Patch. Pairs with auto-finder v0.5.0 (upgrade both). Reviewed by Lector. The live refresh (an open slot re-renders when its file changes on disk)
 listened to `core.file:*`, which arrived only because auto-finder's files pane
 watched the whole cwd recursively. auto-finder's rebuilt files slot (its
 ADR-0200) watches only the directories expanded in it, so a slot's file would
