@@ -51,7 +51,9 @@ function M.hold(slot, path, win)
   local dir = vim.fs.dirname(path)
   local d = _dirs[dir]
   if not d then
-    local handle = w.start(dir, { recursive = false, self_extend = false })
+    -- ignore = {}: fs.watch's default list (/build/, /dist/, /target/, …) matches the FULL path, so a note
+    -- anywhere below such a directory would never refresh. A non-recursive watch has nothing to filter.
+    local handle = w.start(dir, { recursive = false, self_extend = false, ignore = {} })
     if not handle then return end
     d = { handle = handle, slots = {} }
     _dirs[dir] = d

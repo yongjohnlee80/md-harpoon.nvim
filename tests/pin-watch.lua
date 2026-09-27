@@ -56,8 +56,9 @@ local function live(dir)
   return n
 end
 
--- the fixture lives OUTSIDE the cwd: the case the old cwd-wide walk never covered
-local DIR = vim.fn.tempname() .. "-notes"
+-- the fixture lives OUTSIDE the cwd (the case the old cwd-wide walk never covered), under a directory named
+-- like build output: auto-core.fs.watch's default ignore list matches /build/ anywhere in the path
+local DIR = vim.fn.tempname() .. "-notes/build"
 vim.fn.mkdir(DIR, "p")
 DIR = vim.uv.fs_realpath(DIR)
 local NOTE, OTHER = DIR .. "/note.md", DIR .. "/other.md"
