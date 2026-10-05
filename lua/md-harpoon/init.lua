@@ -88,7 +88,12 @@ local config = vim.deepcopy(DEFAULTS)
 --- Merge user options into the config table. Calling this is optional;
 --- defaults are applied at module load.
 ---@param opts? table
+M.DEPRECATION = "md-harpoon.nvim is deprecated: AutoDoc's Markdown preview replaces it, "
+  .. "with the same six slots and <leader>m* keys (github.com/yongjohnlee80/autodoc). "
+  .. "md-harpoon keeps working but gets no new features."
+
 function M.setup(opts)
+  vim.notify_once(M.DEPRECATION, vim.log.levels.WARN, { title = "md-harpoon" })
   config = vim.tbl_deep_extend("force", vim.deepcopy(DEFAULTS), opts or {})
   -- Late-bound dispatch via M.* picks up the function defined further
   -- down in the file (after `State` is declared so its closures

@@ -143,7 +143,15 @@ core.events.subscribe("doc:pinned", function(p) got_pinned = p end)
 -- inside open_slot which we can't drive headless without md-render.
 -- Instead we exercise the topic surface via direct publish to
 -- confirm the registry has the topic + a subscriber wakes.
+local notified = {}
+local real_notify = vim.notify
+vim.notify = function(msg, level) notified[#notified + 1] = { msg = msg, level = level } end
 require("md-harpoon").setup({})
+require("md-harpoon").setup({})
+vim.notify = real_notify
+local dep = vim.tbl_filter(function(n) return tostring(n.msg):find("deprecated", 1, true) end, notified)
+ok("setup() warns once that md-harpoon is deprecated, naming AutoDoc",
+  #dep == 1 and dep[1].level == vim.log.levels.WARN and dep[1].msg:find("AutoDoc", 1, true) ~= nil, vim.inspect(notified))
 core.events.publish("doc:pinned", {
   slot = "2", path = "/abs/x.md", source_bufnr = 99,
 })
