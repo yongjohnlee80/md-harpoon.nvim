@@ -1,5 +1,13 @@
 # md-harpoon.nvim
 
+> **Deprecated.** [AutoDoc](https://github.com/yongjohnlee80/autodoc)'s Markdown preview replaces
+> md-harpoon: the same six slots in the same cascade, the same `<leader>m*` keys (`keys = true`), and
+> a browser view through `autodoc --export html` that needs no pandoc. It has no dependency on
+> md-render.nvim. md-harpoon keeps working at v0.2.x but gets no new features; `setup()` says so once
+> per session. To switch, replace the md-harpoon spec with
+> `{ "yongjohnlee80/autodoc", build = "make build", dependencies = { "yongjohnlee80/auto-core.nvim" }, opts = { keys = true } }`.
+> Its commands are `:AutodocPreview*` (`Focus`, `Render`, `RenderPath`, `Find`, `CloseAll`, `Browser`).
+
 Six-slot floating Markdown previewer for Neovim, with cursor memory and a fuzzy file picker. A wrapper around [`delphinus/md-render.nvim`](https://github.com/delphinus/md-render.nvim) that turns its single bundled float into six coexisting panels arranged in a cascade — useful when you're cross-referencing notes, ADRs, design docs, or a spec and its accompanying README.
 
 ```text
